@@ -556,6 +556,7 @@
       btn.classList.contains('disabled') ||
       btn.classList.contains('inactive') ||
       btn.classList.contains('is-disabled') ||
+      btn.classList.contains('swiper-button-disabled') ||
       btn.classList.contains('lg-disabled') ||
       btn.classList.contains('w-lightbox-inactive') ||
       btn.getAttribute('aria-disabled') === 'true' ||
@@ -917,6 +918,92 @@
       info ? info.total : 0,
       info ? info.index : -1
     );
+  }
+
+  function getFraserLightboxRoot() {
+    const roots = Array.from(document.querySelectorAll('.lightbox-gallery'));
+    return roots.find((root) => {
+      if (!isElementVisible(root)) return false;
+      if (!root.querySelector('.swiper-wrapper, .swiper-slide')) return false;
+
+      return !!root.querySelector(
+        '[data-testid="closeLightboxIcon"], [data-testid="zoomInPictureButton"], .swiper-button-next, .swiper-button-prev'
+      );
+    }) || null;
+  }
+
+  function getFraserWidthHint(url) {
+    const normalized = normalizeUrl(url);
+    if (!normalized) return 0;
+
+    try {
+      const parsed = new URL(normalized);
+      const width = Number(parsed.searchParams.get('w'));
+      return Number.isFinite(width) && width > 0 ? width : 0;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  function isFraserMediaUrl(url) {
+    const normalized = normalizeUrl(url);
+    if (!normalized) return false;
+
+    try {
+      const parsed = new URL(normalized);
+      return parsed.hostname.toLowerCase() === 'media.fraseryachts.com';
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function getBestFraserSlideUrl(slide) {
+    if (!slide) return null;
+
+    const candidates = [];
+    slide.querySelectorAll('picture source[srcset]').forEach((source) => {
+      const urls = extractUrlsFromSrcset(source.getAttribute('srcset'));
+      candidates.push(...urls);
+    });
+
+    slide.querySelectorAll('img').forEach((img) => {
+      const direct = getMediaUrlFromElement(img);
+      if (direct) candidates.push(direct);
+
+      const srcsetUrls = extractUrlsFromSrcset(img.getAttribute('srcset'));
+      candidates.push(...srcsetUrls);
+    });
+
+    slide.querySelectorAll('video,source[src]').forEach((el) => {
+      const direct = getMediaUrlFromElement(el);
+      if (direct) candidates.push(direct);
+    });
+
+    const unique = uniqueMediaItems(candidates);
+    if (!unique.length) return null;
+
+    const ranked = unique
+      .filter((item) => item.mediaType === 'image' || item.mediaType === 'video')
+      .sort((a, b) => {
+        const fraserDelta = Number(isFraserMediaUrl(b.url)) - Number(isFraserMediaUrl(a.url));
+        if (fraserDelta !== 0) return fraserDelta;
+
+        const widthDelta = getFraserWidthHint(b.url) - getFraserWidthHint(a.url);
+        if (widthDelta !== 0) return widthDelta;
+
+        return String(b.url).length - String(a.url).length;
+      });
+
+    return ranked.length ? ranked[0].url : null;
+  }
+
+  function getFraserCounterInfo(root) {
+    if (!root) return null;
+
+    const activeSlide = root.querySelector('.swiper-slide.swiper-slide-active[aria-label]');
+    if (!activeSlide) return null;
+
+    return parseCounterText(activeSlide.getAttribute('aria-label') || '');
   }
 
   function getWixProGalleryFullscreenView() {
@@ -1347,6 +1434,68 @@
     }
   };
 
+  const fraserGalleryAdapter = {
+    name: 'Fraser Gallery',
+    isOpen() {
+      return !!getFraserLightboxRoot();
+    },
+    getCurrentMediaEl() {
+      const root = getFraserLightboxRoot();
+      if (!root) return null;
+
+      const activeSlide = root.querySelector('.swiper-slide.swiper-slide-active');
+      if (activeSlide) {
+        const direct = activeSlide.querySelector('img, video');
+        if (direct) return direct;
+      }
+
+      return findFirstSupportedMedia(root);
+    },
+    getCurrentUrl() {
+      const root = getFraserLightboxRoot();
+      if (!root) return null;
+
+      const activeSlide = root.querySelector('.swiper-slide.swiper-slide-active');
+      const bestUrl = getBestFraserSlideUrl(activeSlide);
+      if (bestUrl) return bestUrl;
+
+      return getMediaUrlFromElement(this.getCurrentMediaEl());
+    },
+    getNextButton() {
+      const root = getFraserLightboxRoot();
+      return root ? root.querySelector('.swiper-button-next[aria-label*="Next"], .swiper-button-next') : null;
+    },
+    isNextDisabled(btn) {
+      return isNextButtonDisabled(btn);
+    },
+    async getAllUrls() {
+      const root = getFraserLightboxRoot();
+      if (!root) return null;
+
+      const items = [];
+      root.querySelectorAll('.swiper-slide[role="group"]').forEach((slide) => {
+        const bestUrl = getBestFraserSlideUrl(slide);
+        const item = createMediaItem(bestUrl, 'image');
+        if (item) items.push(item);
+      });
+
+      const uniqueItems = uniqueMediaItems(items);
+      if (!uniqueItems.length) return null;
+
+      const counterInfo = getFraserCounterInfo(root);
+      const nextBtn = this.getNextButton();
+      if (counterInfo && counterInfo.total > 1 && nextBtn && uniqueItems.length < counterInfo.total) {
+        console.log(`Fraser gallery direct list incomplete (${uniqueItems.length}/${counterInfo.total}); using step-through fallback.`);
+        return null;
+      }
+
+      return uniqueItems;
+    },
+    async waitForNext(previousUrl, timeoutMs = 10000) {
+      return waitForGalleryMediaChange(this, previousUrl, timeoutMs);
+    }
+  };
+
   const wixProGalleryAdapter = {
     name: 'Wix Pro Gallery',
     isOpen() {
@@ -1475,6 +1624,7 @@
     fsLightboxAdapter,
     glightboxAdapter,
     lightbox2Adapter,
+    fraserGalleryAdapter,
     wixProGalleryAdapter,
     bookingGalleryAdapter,
     magnificPopupAdapter
@@ -1655,7 +1805,7 @@
         hideStatusIndicator();
         alert(
           'No supported open gallery detected. Open a supported lightbox first ' +
-          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, Wix Pro Gallery, Booking.com, or Magnific Popup).'
+          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, Fraser Gallery, Wix Pro Gallery, Booking.com, or Magnific Popup).'
         );
         return;
       }
