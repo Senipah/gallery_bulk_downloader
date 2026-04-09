@@ -1085,6 +1085,11 @@
     );
   }
 
+  function getBookingThumbnailButtonCount(root) {
+    const context = root || document;
+    return context.querySelectorAll('[data-testid^="gallery-photo-thumb-"]').length;
+  }
+
   function getBookingPhotoIdFromElement(el) {
     const holder = el && el.closest
       ? el.closest('[data-testid^="gallery-photo-"], [data-testid^="gallery-photo-thumb-"], [data-testid^="gallery-grid-photo-action-"]')
@@ -1575,6 +1580,18 @@
       const root = getBookingSingleViewRoot();
       const nextBtn = this.getNextButton();
       const counterInfo = getBookingGalleryCounterInfo(root);
+      const thumbButtonCount = getBookingThumbnailButtonCount(root);
+
+      if (nextBtn && !counterInfo) {
+        console.log('Booking.com counter unavailable while navigation exists; using step-through fallback.');
+        return null;
+      }
+
+      if (thumbButtonCount > 1 && nextBtn && items.length < thumbButtonCount) {
+        console.log(`Booking.com direct list incomplete (${items.length}/${thumbButtonCount} thumbnail buttons); using step-through fallback.`);
+        return null;
+      }
+
       if (counterInfo && counterInfo.total > 1 && nextBtn && items.length < counterInfo.total) {
         console.log(`Booking.com direct list incomplete (${items.length}/${counterInfo.total}); using step-through fallback.`);
         return null;
