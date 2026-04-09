@@ -902,6 +902,54 @@
     );
   }
 
+  function getBookingSingleViewRoot() {
+    const root = document.querySelector('[data-testid="PropertyGallerySingleView-wrapper"] [data-testid="gallery-single-view"]') ||
+      document.querySelector('[data-testid="gallery-single-view"]');
+    return root && isElementVisible(root) ? root : null;
+  }
+
+  function getBookingGalleryCounterInfo(root) {
+    if (!root) return null;
+
+    return getCounterInfoFromSelectors(
+      ['[data-testid="gallery-single-view-counter-text"]'],
+      root
+    );
+  }
+
+  function getBookingPhotoIdFromElement(el) {
+    const holder = el && el.closest
+      ? el.closest('[data-testid^="gallery-photo-"], [data-testid^="gallery-photo-thumb-"], [data-testid^="gallery-grid-photo-action-"]')
+      : null;
+    if (!holder) return null;
+
+    const testId = holder.getAttribute('data-testid') || '';
+    const match = testId.match(/(\d+)(?!.*\d)/);
+    return match ? match[1] : null;
+  }
+
+  function getBookingGalleryDomItems() {
+    const orderedSelectors = [
+      '[data-testid="gallery-single-view-image-switcher"] img',
+      '[data-testid="gallery-single-view-thumbnails"] img'
+    ];
+
+    const byPhotoId = new Map();
+    for (const selector of orderedSelectors) {
+      document.querySelectorAll(selector).forEach((img) => {
+        const item = createMediaItem(getMediaUrlFromElement(img), 'image');
+        if (!item) return;
+
+        const photoId = getBookingPhotoIdFromElement(img) || item.url;
+        if (!byPhotoId.has(photoId)) {
+          byPhotoId.set(photoId, item);
+        }
+      });
+    }
+
+    return uniqueMediaItems(Array.from(byPhotoId.values()));
+  }
+
   const lightGalleryAdapter = {
     name: 'LightGallery',
     isOpen() {
@@ -1218,6 +1266,51 @@
     }
   };
 
+  const bookingGalleryAdapter = {
+    name: 'Booking.com Gallery',
+    isOpen() {
+      return !!getBookingSingleViewRoot();
+    },
+    getCurrentMediaEl() {
+      const root = getBookingSingleViewRoot();
+      if (!root) return null;
+
+      const switcher = root.querySelector('[data-testid="gallery-single-view-image-switcher"]');
+      if (switcher) {
+        return findFirstSupportedMedia(switcher);
+      }
+
+      return findFirstSupportedMedia(root);
+    },
+    getCurrentUrl() {
+      return getMediaUrlFromElement(this.getCurrentMediaEl());
+    },
+    getNextButton() {
+      const root = getBookingSingleViewRoot();
+      return root ? root.querySelector('[data-testid="gallery-single-view-slider-next-button"]') : null;
+    },
+    isNextDisabled(btn) {
+      return isNextButtonDisabled(btn);
+    },
+    async getAllUrls() {
+      const items = getBookingGalleryDomItems();
+      if (!items.length) return null;
+
+      const root = getBookingSingleViewRoot();
+      const nextBtn = this.getNextButton();
+      const counterInfo = getBookingGalleryCounterInfo(root);
+      if (counterInfo && counterInfo.total > 1 && nextBtn && items.length < counterInfo.total) {
+        console.log(`Booking.com direct list incomplete (${items.length}/${counterInfo.total}); using step-through fallback.`);
+        return null;
+      }
+
+      return items;
+    },
+    async waitForNext(previousUrl, timeoutMs = 10000) {
+      return waitForGalleryMediaChange(this, previousUrl, timeoutMs);
+    }
+  };
+
   const magnificPopupAdapter = {
     name: 'Magnific Popup',
     isOpen() {
@@ -1255,6 +1348,7 @@
     fsLightboxAdapter,
     glightboxAdapter,
     lightbox2Adapter,
+    bookingGalleryAdapter,
     magnificPopupAdapter
   ];
 
@@ -1433,7 +1527,7 @@
         hideStatusIndicator();
         alert(
           'No supported open gallery detected. Open a supported lightbox first ' +
-          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, or Magnific Popup).'
+          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, Booking.com, or Magnific Popup).'
         );
         return;
       }

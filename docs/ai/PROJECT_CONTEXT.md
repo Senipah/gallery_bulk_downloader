@@ -12,6 +12,7 @@
 - `FS Lightbox`
 - `GLightbox`
 - `Lightbox2`
+- `Booking.com Gallery`
 - `Magnific Popup`
 
 ## Runtime Data Model
