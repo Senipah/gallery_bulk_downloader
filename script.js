@@ -13,6 +13,7 @@
 
   const BTN_ID = 'tm-gallery-download-btn';
   const STATUS_ID = 'tm-gallery-download-status';
+  const PROMPT_FOR_FOLDER_NAME = true;
   let stylesInjected = false;
   let runInProgress = false;
   let statusHideTimer = null;
@@ -95,6 +96,22 @@
     if (fromHost) return fromHost;
 
     return 'gallery-downloads';
+  }
+
+  function chooseDownloadSubdirectory(defaultName) {
+    if (!PROMPT_FOR_FOLDER_NAME) return defaultName;
+
+    const input = window.prompt(
+      'Folder name under Downloads (leave blank to use page title):',
+      defaultName
+    );
+
+    if (input === null) return null;
+
+    const trimmed = String(input).trim();
+    if (!trimmed) return defaultName;
+
+    return sanitizePathSegment(trimmed, defaultName);
   }
 
   function buildDownloadName(filename, downloadSubdirectory) {
@@ -902,6 +919,70 @@
     );
   }
 
+  function getWixProGalleryFullscreenView() {
+    const view = document.querySelector('[data-hook="fullscreen-view"]');
+    if (!view || !isElementVisible(view)) return null;
+    if (view.getAttribute('aria-hidden') === 'true') return null;
+    return view;
+  }
+
+  function normalizeWixMediaUrl(url) {
+    const normalized = normalizeUrl(url);
+    if (!normalized) return null;
+
+    try {
+      const parsed = new URL(normalized);
+      if (parsed.hostname !== 'static.wixstatic.com') return normalized;
+
+      const match = parsed.pathname.match(/^\/media\/([^/]+\.[a-z0-9]+)(?:\/v1\/.*)?$/i);
+      if (!match) return normalized;
+      return `${parsed.origin}/media/${match[1]}`;
+    } catch (error) {
+      return normalized;
+    }
+  }
+
+  function extractUrlsFromSrcset(srcset) {
+    if (!srcset) return [];
+
+    return String(srcset)
+      .split(',')
+      .map((part) => part.trim().split(/\s+/)[0])
+      .filter(Boolean);
+  }
+
+  function getWixProGalleryItemsFromOpenModal(root) {
+    if (!root) return [];
+
+    const items = [];
+
+    root.querySelectorAll('.thumbnailItem[data-key]').forEach((thumb) => {
+      const backgroundImage = thumb.style && thumb.style.backgroundImage
+        ? thumb.style.backgroundImage
+        : '';
+      const match = backgroundImage.match(/url\(["']?([^"')]+)["']?\)/i);
+      if (!match || !match[1]) return;
+
+      const item = createMediaItem(normalizeWixMediaUrl(match[1]), 'image');
+      if (item) items.push(item);
+    });
+
+    root.querySelectorAll('[data-hook="gallery-item-image-img"]').forEach((img) => {
+      const item = createMediaItem(normalizeWixMediaUrl(getMediaUrlFromElement(img)), 'image');
+      if (item) items.push(item);
+    });
+
+    root.querySelectorAll('picture source[srcset]').forEach((source) => {
+      const urls = extractUrlsFromSrcset(source.getAttribute('srcset'));
+      for (const url of urls) {
+        const item = createMediaItem(normalizeWixMediaUrl(url), 'image');
+        if (item) items.push(item);
+      }
+    });
+
+    return uniqueMediaItems(items);
+  }
+
   function getBookingSingleViewRoot() {
     const root = document.querySelector('[data-testid="PropertyGallerySingleView-wrapper"] [data-testid="gallery-single-view"]') ||
       document.querySelector('[data-testid="gallery-single-view"]');
@@ -1266,6 +1347,52 @@
     }
   };
 
+  const wixProGalleryAdapter = {
+    name: 'Wix Pro Gallery',
+    isOpen() {
+      return !!getWixProGalleryFullscreenView();
+    },
+    getCurrentMediaEl() {
+      const root = getWixProGalleryFullscreenView();
+      if (!root) return null;
+
+      const activeContainer = root.querySelector('[data-hook="item-container"][aria-hidden="false"]');
+      if (activeContainer) {
+        const activeImage = activeContainer.querySelector('[data-hook="gallery-item-image-img"], img, video');
+        if (activeImage) return activeImage;
+      }
+
+      return findFirstSupportedMedia(root);
+    },
+    getCurrentUrl() {
+      return normalizeWixMediaUrl(getMediaUrlFromElement(this.getCurrentMediaEl()));
+    },
+    getNextButton() {
+      const root = getWixProGalleryFullscreenView();
+      return root ? root.querySelector('[data-hook="nav-arrow-next"]') : null;
+    },
+    isNextDisabled(btn) {
+      return isNextButtonDisabled(btn);
+    },
+    async getAllUrls() {
+      const root = getWixProGalleryFullscreenView();
+      const items = getWixProGalleryItemsFromOpenModal(root);
+      if (!items.length) return null;
+
+      const thumbCount = root ? root.querySelectorAll('.thumbnailItem[data-key]').length : 0;
+      const nextBtn = this.getNextButton();
+      if (thumbCount > 1 && nextBtn && items.length < thumbCount) {
+        console.log(`Wix Pro Gallery direct list incomplete (${items.length}/${thumbCount}); using step-through fallback.`);
+        return null;
+      }
+
+      return items;
+    },
+    async waitForNext(previousUrl, timeoutMs = 10000) {
+      return waitForGalleryMediaChange(this, previousUrl, timeoutMs);
+    }
+  };
+
   const bookingGalleryAdapter = {
     name: 'Booking.com Gallery',
     isOpen() {
@@ -1348,6 +1475,7 @@
     fsLightboxAdapter,
     glightboxAdapter,
     lightbox2Adapter,
+    wixProGalleryAdapter,
     bookingGalleryAdapter,
     magnificPopupAdapter
   ];
@@ -1527,12 +1655,18 @@
         hideStatusIndicator();
         alert(
           'No supported open gallery detected. Open a supported lightbox first ' +
-          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, Booking.com, or Magnific Popup).'
+          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, Wix Pro Gallery, Booking.com, or Magnific Popup).'
         );
         return;
       }
 
-      const downloadSubdirectory = getDownloadSubdirectoryName();
+      const defaultSubdirectory = getDownloadSubdirectoryName();
+      const downloadSubdirectory = chooseDownloadSubdirectory(defaultSubdirectory);
+      if (!downloadSubdirectory) {
+        hideStatusIndicator();
+        alert('Download cancelled.');
+        return;
+      }
       let downloaded = 0;
       let skipped = 0;
       let failed = 0;
