@@ -6,6 +6,7 @@
 // @match        *://*/*
 // @grant        GM_download
 // @grant        GM_addStyle
+// @grant        GM_info
 // ==/UserScript==
 
 (function () {
@@ -43,6 +44,19 @@
   ];
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function getDownloadMode() {
+    try {
+      if (typeof GM_info === 'object' && GM_info && typeof GM_info.downloadMode === 'string') {
+        return GM_info.downloadMode;
+      }
+    } catch (error) {}
+    return 'unknown';
+  }
+
+  function supportsSubfolderDownloadPaths() {
+    return getDownloadMode() === 'browser';
+  }
 
   function normalizeUrl(url) {
     if (!url) return null;
@@ -1853,6 +1867,17 @@
         hideStatusIndicator();
         alert('Download cancelled.');
         return;
+      }
+
+      if (!supportsSubfolderDownloadPaths()) {
+        console.warn(
+          `Tampermonkey download mode is "${getDownloadMode()}". Browser may ignore folder paths and save into Downloads root.`
+        );
+        alert(
+          'Subfolder saving may be unavailable in current Tampermonkey download mode. ' +
+          'Open Tampermonkey Dashboard -> Settings -> Downloads and use Browser API mode, then grant downloads permission. ' +
+          'Your browser may still override filenames.'
+        );
       }
       let downloaded = 0;
       let skipped = 0;
