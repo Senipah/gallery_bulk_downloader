@@ -1032,9 +1032,24 @@
   function extractUrlsFromSrcset(srcset) {
     if (!srcset) return [];
 
-    return String(srcset)
-      .split(',')
-      .map((part) => part.trim().split(/\s+/)[0])
+    const normalized = String(srcset).trim();
+    if (!normalized) return [];
+
+    // Split candidates on commas that are followed by a likely URL start.
+    // This avoids breaking Wix URLs that contain commas inside the URL path.
+    let candidates = normalized.split(/,(?=\s*(?:https?:|\/\/|\/|\.\/|\.\.\/|data:|blob:))/i);
+    if (candidates.length === 1) {
+      candidates = normalized.split(/,\s+/);
+    }
+
+    return candidates
+      .map((candidate) => {
+        const trimmed = candidate.trim();
+        if (!trimmed) return '';
+
+        const firstWhitespace = trimmed.search(/\s/);
+        return (firstWhitespace < 0 ? trimmed : trimmed.slice(0, firstWhitespace)).trim();
+      })
       .filter(Boolean);
   }
 
@@ -1530,11 +1545,16 @@
     },
     async getAllUrls() {
       const root = getWixProGalleryFullscreenView();
+      const nextBtn = this.getNextButton();
+      if (nextBtn) {
+        console.log('Using step-through mode for Wix Pro Gallery for reliability.');
+        return null;
+      }
+
       const items = getWixProGalleryItemsFromOpenModal(root);
       if (!items.length) return null;
 
       const thumbCount = root ? root.querySelectorAll('.thumbnailItem[data-key]').length : 0;
-      const nextBtn = this.getNextButton();
       if (thumbCount > 1 && nextBtn && items.length < thumbCount) {
         console.log(`Wix Pro Gallery direct list incomplete (${items.length}/${thumbCount}); using step-through fallback.`);
         return null;
