@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gallery Bulk Downloader
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  Download image/video files from supported open lightbox overlays
 // @match        *://*/*
 // @grant        GM_download
@@ -12,7 +12,16 @@
   'use strict';
 
   const BTN_ID = 'tm-gallery-download-btn';
+  const STATUS_ID = 'tm-gallery-download-status';
   let stylesInjected = false;
+  let runInProgress = false;
+  let statusHideTimer = null;
+
+  const WINDOWS_RESERVED_NAMES = new Set([
+    'con', 'prn', 'aux', 'nul',
+    'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
+    'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9'
+  ]);
 
   const IMAGE_EXTENSIONS = new Set([
     'jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg', 'tif', 'tiff', 'heic', 'heif'
@@ -57,6 +66,41 @@
     return String(name || '')
       .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
       .trim();
+  }
+
+  function sanitizePathSegment(name, fallback = '') {
+    let cleaned = sanitizeFilename(name)
+      .replace(/\s+/g, ' ')
+      .replace(/[. ]+$/g, '')
+      .trim();
+
+    if (cleaned.length > 100) {
+      cleaned = cleaned.slice(0, 100).replace(/[. ]+$/g, '').trim();
+    }
+
+    if (!cleaned) return fallback;
+
+    if (WINDOWS_RESERVED_NAMES.has(cleaned.toLowerCase())) {
+      cleaned = `_${cleaned}`;
+    }
+
+    return cleaned || fallback;
+  }
+
+  function getDownloadSubdirectoryName() {
+    const fromTitle = sanitizePathSegment(document.title, '');
+    if (fromTitle) return fromTitle;
+
+    const fromHost = sanitizePathSegment(window.location.hostname, '');
+    if (fromHost) return fromHost;
+
+    return 'gallery-downloads';
+  }
+
+  function buildDownloadName(filename, downloadSubdirectory) {
+    if (!filename) return null;
+    if (!downloadSubdirectory) return filename;
+    return `${downloadSubdirectory}/${filename}`;
   }
 
   function parseCounterText(text) {
@@ -404,54 +448,60 @@
     return `${prefix}-${String(index + 1).padStart(3, '0')}.${fallbackExt}`;
   }
 
-  function createSkippedResult(item, index, skipReason) {
+  function createSkippedResult(item, index, skipReason, downloadSubdirectory = '') {
     const mediaType = item && item.mediaType ? item.mediaType : 'unsupported';
     const url = item && item.url ? item.url : null;
+    const filename = url ? getFilename(url, index, mediaType) : null;
+    const downloadName = buildDownloadName(filename, downloadSubdirectory);
 
     return {
       status: 'skipped',
       ok: false,
       url,
-      filename: url ? getFilename(url, index, mediaType) : null,
+      filename,
+      downloadName,
       mediaType,
       skipReason
     };
   }
 
-  function downloadMediaItem(item, index) {
+  function downloadMediaItem(item, index, downloadSubdirectory = '') {
     const normalized = createMediaItem(item && item.url, item && item.mediaType);
     if (!normalized) {
-      return Promise.resolve(createSkippedResult(item, index, 'missing_url'));
+      return Promise.resolve(createSkippedResult(item, index, 'missing_url', downloadSubdirectory));
     }
 
     if (normalized.mediaType !== 'image' && normalized.mediaType !== 'video') {
-      return Promise.resolve(createSkippedResult(normalized, index, 'unsupported_media_type'));
+      return Promise.resolve(createSkippedResult(normalized, index, 'unsupported_media_type', downloadSubdirectory));
     }
 
     return new Promise((resolve) => {
       const filename = getFilename(normalized.url, index, normalized.mediaType);
+      const downloadName = buildDownloadName(filename, downloadSubdirectory);
 
       GM_download({
         url: normalized.url,
-        name: filename,
+        name: downloadName,
         saveAs: false,
         onload: () => {
-          console.log(`Downloaded: ${filename} (${normalized.mediaType})`);
+          console.log(`Downloaded: ${downloadName} (${normalized.mediaType})`);
           resolve({
             status: 'downloaded',
             ok: true,
             url: normalized.url,
             filename,
+            downloadName,
             mediaType: normalized.mediaType
           });
         },
         onerror: (err) => {
-          console.warn(`Failed: ${filename}`, err);
+          console.warn(`Failed: ${downloadName}`, err);
           resolve({
             status: 'failed',
             ok: false,
             url: normalized.url,
             filename,
+            downloadName,
             mediaType: normalized.mediaType,
             err
           });
@@ -460,12 +510,21 @@
     });
   }
 
-  async function downloadMediaItems(items) {
+  async function downloadMediaItems(items, downloadSubdirectory = '', onProgress = null) {
     const results = [];
+    const deduped = uniqueMediaItems(items);
+    const total = deduped.length;
 
-    for (const [index, item] of uniqueMediaItems(items).entries()) {
-      const result = await downloadMediaItem(item, index);
+    for (const [index, item] of deduped.entries()) {
+      const result = await downloadMediaItem(item, index, downloadSubdirectory);
       results.push(result);
+      if (typeof onProgress === 'function') {
+        onProgress({
+          result,
+          processed: index + 1,
+          total
+        });
+      }
       await sleep(250);
     }
 
@@ -1203,7 +1262,88 @@
     return galleryAdapters.find((adapter) => adapter.isOpen()) || null;
   }
 
-  async function downloadByStepping(adapter) {
+  function clearStatusHideTimer() {
+    if (statusHideTimer) {
+      window.clearTimeout(statusHideTimer);
+      statusHideTimer = null;
+    }
+  }
+
+  function ensureStatusElement() {
+    let status = document.getElementById(STATUS_ID);
+    if (status) return status;
+
+    status = document.createElement('div');
+    status.id = STATUS_ID;
+    status.innerHTML = [
+      '<div class="tm-status-title"></div>',
+      '<div class="tm-status-bar"><div class="tm-status-bar-fill"></div></div>',
+      '<div class="tm-status-meta"></div>'
+    ].join('');
+
+    document.body.appendChild(status);
+    return status;
+  }
+
+  function setStatusIndicator(state) {
+    ensureStyles();
+    clearStatusHideTimer();
+
+    const status = ensureStatusElement();
+    const titleEl = status.querySelector('.tm-status-title');
+    const fillEl = status.querySelector('.tm-status-bar-fill');
+    const metaEl = status.querySelector('.tm-status-meta');
+
+    const processed = Number.isFinite(state.processed) ? state.processed : 0;
+    const total = Number.isFinite(state.total) && state.total > 0 ? state.total : null;
+    const downloaded = Number.isFinite(state.downloaded) ? state.downloaded : 0;
+    const skipped = Number.isFinite(state.skipped) ? state.skipped : 0;
+    const failed = Number.isFinite(state.failed) ? state.failed : 0;
+    const modeText = state.mode ? ` | ${state.mode}` : '';
+
+    titleEl.textContent = state.title || 'Preparing download...';
+    metaEl.textContent = total
+      ? `${processed}/${total} processed | ${downloaded} downloaded | ${skipped} skipped | ${failed} failed${modeText}`
+      : `${processed} processed | ${downloaded} downloaded | ${skipped} skipped | ${failed} failed${modeText}`;
+
+    if (total) {
+      const pct = Math.max(0, Math.min(100, Math.round((processed / total) * 100)));
+      fillEl.style.width = `${pct}%`;
+      status.classList.remove('is-indeterminate');
+    } else {
+      fillEl.style.width = '45%';
+      status.classList.add('is-indeterminate');
+    }
+
+    status.classList.add('is-visible');
+  }
+
+  function hideStatusIndicator(delayMs = 0) {
+    const hide = () => {
+      const status = document.getElementById(STATUS_ID);
+      if (status) {
+        status.classList.remove('is-visible');
+        status.classList.remove('is-indeterminate');
+      }
+    };
+
+    clearStatusHideTimer();
+    if (delayMs > 0) {
+      statusHideTimer = window.setTimeout(hide, delayMs);
+    } else {
+      hide();
+    }
+  }
+
+  function setButtonBusy(isBusy) {
+    const btn = document.getElementById(BTN_ID);
+    if (!btn) return;
+
+    btn.disabled = !!isBusy;
+    btn.textContent = isBusy ? 'Downloading...' : 'Download Open Gallery';
+  }
+
+  async function downloadByStepping(adapter, downloadSubdirectory = '', onProgress = null) {
     const seen = new Set();
     const results = [];
     let index = 0;
@@ -1228,9 +1368,16 @@
       const result = await downloadMediaItem({
         url: currentUrl,
         mediaType: currentType
-      }, index);
+      }, index, downloadSubdirectory);
       results.push(result);
       index++;
+      if (typeof onProgress === 'function') {
+        onProgress({
+          result,
+          processed: index,
+          total: null
+        });
+      }
 
       await sleep(500);
 
@@ -1263,28 +1410,118 @@
   }
 
   async function runDownloader() {
-    const adapter = await waitForSupportedGalleryOpen();
-
-    if (!adapter) {
-      alert(
-        'No supported open gallery detected. Open a supported lightbox first ' +
-        '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, or Magnific Popup).'
-      );
+    if (runInProgress) {
+      alert('A gallery download is already in progress.');
       return;
     }
 
-    let results = [];
+    runInProgress = true;
+    setButtonBusy(true);
+    try {
+      setStatusIndicator({
+        title: 'Looking for supported open gallery...',
+        processed: 0,
+        total: null,
+        downloaded: 0,
+        skipped: 0,
+        failed: 0,
+        mode: 'waiting'
+      });
 
-    const directItems = await adapter.getAllUrls();
-    if (directItems && directItems.length) {
-      results = await downloadMediaItems(directItems);
-    } else {
-      results = await downloadByStepping(adapter);
+      const adapter = await waitForSupportedGalleryOpen();
+      if (!adapter) {
+        hideStatusIndicator();
+        alert(
+          'No supported open gallery detected. Open a supported lightbox first ' +
+          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, or Magnific Popup).'
+        );
+        return;
+      }
+
+      const downloadSubdirectory = getDownloadSubdirectoryName();
+      let downloaded = 0;
+      let skipped = 0;
+      let failed = 0;
+
+      const onProgress = ({ result, processed, total }) => {
+        if (result.status === 'downloaded') downloaded += 1;
+        if (result.status === 'skipped') skipped += 1;
+        if (result.status === 'failed') failed += 1;
+
+        setStatusIndicator({
+          title: `Downloading from ${adapter.name}`,
+          processed,
+          total,
+          downloaded,
+          skipped,
+          failed,
+          mode: total ? 'direct list' : 'step-through'
+        });
+      };
+
+      let results = [];
+      const directItems = await adapter.getAllUrls();
+      if (directItems && directItems.length) {
+        const directTotal = uniqueMediaItems(directItems).length;
+        setStatusIndicator({
+          title: `Downloading from ${adapter.name}`,
+          processed: 0,
+          total: directTotal,
+          downloaded: 0,
+          skipped: 0,
+          failed: 0,
+          mode: 'direct list'
+        });
+
+        results = await downloadMediaItems(directItems, downloadSubdirectory, onProgress);
+      } else {
+        setStatusIndicator({
+          title: `Downloading from ${adapter.name}`,
+          processed: 0,
+          total: null,
+          downloaded: 0,
+          skipped: 0,
+          failed: 0,
+          mode: 'step-through'
+        });
+
+        results = await downloadByStepping(adapter, downloadSubdirectory, onProgress);
+      }
+
+      const counts = summarizeResults(results);
+      setStatusIndicator({
+        title: `Done (${adapter.name})`,
+        processed: results.length,
+        total: results.length || null,
+        downloaded: counts.downloaded,
+        skipped: counts.skipped,
+        failed: counts.failed,
+        mode: `folder: ${downloadSubdirectory}`
+      });
+
+      hideStatusIndicator(5000);
+      alert(
+        `Done. ${counts.downloaded} downloaded, ${counts.skipped} skipped, ${counts.failed} failed from ${adapter.name}. ` +
+        `Saved under Downloads/${downloadSubdirectory}/`
+      );
+      console.log('Download results:', results);
+    } catch (error) {
+      console.error('Gallery downloader failed unexpectedly:', error);
+      setStatusIndicator({
+        title: 'Download stopped unexpectedly',
+        processed: 0,
+        total: null,
+        downloaded: 0,
+        skipped: 0,
+        failed: 0,
+        mode: 'error'
+      });
+      hideStatusIndicator(6000);
+      alert('Unexpected error while downloading. Check the browser console for details.');
+    } finally {
+      runInProgress = false;
+      setButtonBusy(false);
     }
-
-    const counts = summarizeResults(results);
-    alert(`Done. ${counts.downloaded} downloaded, ${counts.skipped} skipped, ${counts.failed} failed from ${adapter.name}.`);
-    console.log('Download results:', results);
   }
 
   function ensureStyles() {
@@ -1310,6 +1547,73 @@
       #${BTN_ID}:hover {
         opacity: 0.92;
       }
+
+      #${BTN_ID}:disabled {
+        opacity: 0.7;
+        cursor: default;
+      }
+
+      #${STATUS_ID} {
+        position: fixed;
+        top: 60px;
+        right: 16px;
+        z-index: 2147483647;
+        width: min(330px, calc(100vw - 32px));
+        border-radius: 10px;
+        border: 1px solid rgba(0, 0, 0, 0.12);
+        background: rgba(255, 255, 255, 0.96);
+        color: #111;
+        padding: 10px 12px;
+        font: 12px/1.35 sans-serif;
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+        opacity: 0;
+        transform: translateY(-4px);
+        transition: opacity 160ms ease, transform 160ms ease;
+        pointer-events: none;
+      }
+
+      #${STATUS_ID}.is-visible {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      #${STATUS_ID} .tm-status-title {
+        font-weight: 600;
+        margin-bottom: 7px;
+      }
+
+      #${STATUS_ID} .tm-status-bar {
+        width: 100%;
+        height: 6px;
+        border-radius: 999px;
+        background: #e5e5e5;
+        overflow: hidden;
+        margin-bottom: 7px;
+      }
+
+      #${STATUS_ID} .tm-status-bar-fill {
+        height: 100%;
+        width: 0;
+        background: #111;
+        transition: width 180ms ease;
+      }
+
+      #${STATUS_ID}.is-indeterminate .tm-status-bar-fill {
+        animation: tm-gallery-status-indeterminate 1.1s ease-in-out infinite;
+      }
+
+      #${STATUS_ID} .tm-status-meta {
+        color: #333;
+      }
+
+      @keyframes tm-gallery-status-indeterminate {
+        0% {
+          transform: translateX(-120%);
+        }
+        100% {
+          transform: translateX(260%);
+        }
+      }
     `);
   }
 
@@ -1320,7 +1624,8 @@
 
     const btn = document.createElement('button');
     btn.id = BTN_ID;
-    btn.textContent = 'Download Open Gallery';
+    btn.textContent = runInProgress ? 'Downloading...' : 'Download Open Gallery';
+    btn.disabled = runInProgress;
     btn.addEventListener('click', runDownloader);
     document.body.appendChild(btn);
   }
