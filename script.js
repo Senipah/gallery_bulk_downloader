@@ -1203,10 +1203,20 @@
 
     const cleaned = trimmed.replace(/^\/+/, '');
     if (/^download\//i.test(cleaned)) {
-      return `https://photos.superyachtapi.com/${cleaned}`;
+      const normalizedDownloadPath = cleaned.replace(/\/extra_large\b/i, '/extra-large');
+      return `https://photos.superyachtapi.com/${normalizedDownloadPath}`;
     }
 
     if (/^photo\//i.test(cleaned)) {
+      const photoPathMatch = cleaned.match(
+        /^photo\/(\d+)\/image\/(extra[-_]large|large|medium|small)(?:-[^/]+)?\.[a-z0-9]+$/i
+      );
+      if (photoPathMatch) {
+        const resolvedId = photoPathMatch[1];
+        const resolvedSize = String(photoPathMatch[2]).replace('_', '-').toLowerCase();
+        return `https://photos.superyachtapi.com/download/${resolvedId}/${resolvedSize}`;
+      }
+
       return `https://photos.superyachtapi.com/download/${cleaned}`;
     }
 
@@ -1221,8 +1231,19 @@
   function getSuperYachtTimesPreferredPhotoPath(photo) {
     if (!photo || typeof photo !== 'object') return null;
 
+    const urls = photo.urls && typeof photo.urls === 'object' ? photo.urls : null;
+    if (urls) {
+      const preferredUrlOrder = ['extraLarge', 'extra_large', 'large', 'medium', 'small'];
+      for (const key of preferredUrlOrder) {
+        const candidate = urls[key];
+        if (typeof candidate === 'string' && candidate.trim()) {
+          return candidate.trim();
+        }
+      }
+    }
+
     const versions = Array.isArray(photo.versions) ? photo.versions : [];
-    const preferredVersionOrder = ['extra_large', 'large', 'original', 'medium', 'small'];
+    const preferredVersionOrder = ['extra_large', 'large', 'medium', 'small', 'original'];
     for (const preferred of preferredVersionOrder) {
       const version = versions.find((candidate) => {
         if (!candidate || typeof candidate !== 'object') return false;
@@ -1231,17 +1252,6 @@
       });
       if (version && typeof version.id === 'string' && version.id.trim()) {
         return version.id.trim();
-      }
-    }
-
-    const urls = photo.urls && typeof photo.urls === 'object' ? photo.urls : null;
-    if (!urls) return null;
-
-    const preferredUrlOrder = ['extraLarge', 'extra_large', 'large', 'medium', 'small'];
-    for (const key of preferredUrlOrder) {
-      const candidate = urls[key];
-      if (typeof candidate === 'string' && candidate.trim()) {
-        return candidate.trim();
       }
     }
 
