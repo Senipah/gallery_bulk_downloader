@@ -1152,6 +1152,95 @@
     return uniqueMediaItems(Array.from(byPhotoId.values()));
   }
 
+  function isBoatInternationalHost() {
+    const host = String(window.location.hostname || '').toLowerCase();
+    return host === 'boatinternational.com' || host.endsWith('.boatinternational.com');
+  }
+
+  function getBoatInternationalOpenGalleryRoot() {
+    if (!isBoatInternationalHost()) return null;
+
+    const roots = Array.from(document.querySelectorAll('.modal.modal--gallery.modal--show, .modal--gallery.modal--show'));
+    return roots.find((root) => isElementVisible(root) && root.querySelector('.slider__wrapper--gallery')) || null;
+  }
+
+  function getBoatInternationalWidthHint(url) {
+    const normalized = normalizeUrl(url);
+    if (!normalized) return 0;
+
+    try {
+      const parsed = new URL(normalized);
+      const raw = `${parsed.pathname}${parsed.search}`;
+      const decoded = decodeURIComponent(raw);
+      const decodedMatch = decoded.match(/r\[width\]=(\d+)/i);
+      if (decodedMatch) {
+        const width = Number(decodedMatch[1]);
+        return Number.isFinite(width) && width > 0 ? width : 0;
+      }
+
+      const encodedMatch = raw.match(/(?:r%5Bwidth%5D|r\[width\])=(\d+)/i);
+      if (!encodedMatch) return 0;
+
+      const width = Number(encodedMatch[1]);
+      return Number.isFinite(width) && width > 0 ? width : 0;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  function isBoatInternationalCdnUrl(url) {
+    const normalized = normalizeUrl(url);
+    if (!normalized) return false;
+
+    try {
+      const parsed = new URL(normalized);
+      return parsed.hostname.toLowerCase() === 'cdn.boatinternational.com';
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function getBestBoatInternationalMediaUrl(root) {
+    if (!root) return null;
+
+    const candidates = [];
+    root.querySelectorAll('picture source[srcset], img[srcset]').forEach((sourceLike) => {
+      const urls = extractUrlsFromSrcset(sourceLike.getAttribute('srcset'));
+      candidates.push(...urls);
+    });
+
+    root.querySelectorAll('img,video,source[src]').forEach((el) => {
+      const direct = getMediaUrlFromElement(el);
+      if (direct) candidates.push(direct);
+    });
+
+    const ranked = uniqueMediaItems(candidates)
+      .filter((item) => item.mediaType === 'image' || item.mediaType === 'video')
+      .sort((a, b) => {
+        const cdnDelta = Number(isBoatInternationalCdnUrl(b.url)) - Number(isBoatInternationalCdnUrl(a.url));
+        if (cdnDelta !== 0) return cdnDelta;
+
+        const nonWebpDelta = Number(!/\.webp(?:$|[?#])/i.test(b.url)) - Number(!/\.webp(?:$|[?#])/i.test(a.url));
+        if (nonWebpDelta !== 0) return nonWebpDelta;
+
+        const widthDelta = getBoatInternationalWidthHint(b.url) - getBoatInternationalWidthHint(a.url);
+        if (widthDelta !== 0) return widthDelta;
+
+        return String(b.url).length - String(a.url).length;
+      });
+
+    return ranked.length ? ranked[0].url : null;
+  }
+
+  function getBoatInternationalCounterInfo(root) {
+    if (!root) return null;
+
+    return getCounterInfoFromSelectors(
+      ['[data-testid="image-counter"]', '.slider__counter--gallery'],
+      root
+    );
+  }
+
   function isSuperYachtTimesHost() {
     const host = String(window.location.hostname || '').toLowerCase();
     return host === 'superyachttimes.com' || host.endsWith('.superyachttimes.com');
@@ -1793,6 +1882,56 @@
     }
   };
 
+  const boatInternationalGalleryAdapter = {
+    name: 'Boat International Gallery',
+    isOpen() {
+      return !!getBoatInternationalOpenGalleryRoot();
+    },
+    getCurrentMediaEl() {
+      const root = getBoatInternationalOpenGalleryRoot();
+      if (!root) return null;
+
+      const activeSlide = root.querySelector('.slider__slide--gallery');
+      if (activeSlide) {
+        const direct = activeSlide.querySelector('img[data-testid="globalLightboxImage"], img, video');
+        if (direct) return direct;
+      }
+
+      return root.querySelector('img[data-testid="globalLightboxImage"], img, video') || findFirstSupportedMedia(root);
+    },
+    getCurrentUrl() {
+      const root = getBoatInternationalOpenGalleryRoot();
+      if (!root) return null;
+
+      const activeSlide = root.querySelector('.slider__slide--gallery');
+      const bestUrl = getBestBoatInternationalMediaUrl(activeSlide || root);
+      if (bestUrl) return bestUrl;
+
+      return getMediaUrlFromElement(this.getCurrentMediaEl());
+    },
+    getNextButton() {
+      const root = getBoatInternationalOpenGalleryRoot();
+      return root
+        ? root.querySelector('.slider__button--next, .slider__button[aria-label*="Next"]')
+        : null;
+    },
+    isNextDisabled(btn) {
+      if (isNextButtonDisabled(btn)) return true;
+
+      const root = getBoatInternationalOpenGalleryRoot();
+      const counterInfo = getBoatInternationalCounterInfo(root);
+      if (!counterInfo) return false;
+
+      return counterInfo.index >= counterInfo.total - 1;
+    },
+    async getAllUrls() {
+      return null;
+    },
+    async waitForNext(previousUrl, timeoutMs = 10000) {
+      return waitForGalleryMediaChange(this, previousUrl, timeoutMs);
+    }
+  };
+
   const superYachtTimesAdapter = {
     name: 'SuperYacht Times Article Gallery',
     isOpen() {
@@ -1870,6 +2009,7 @@
     fraserGalleryAdapter,
     wixProGalleryAdapter,
     bookingGalleryAdapter,
+    boatInternationalGalleryAdapter,
     superYachtTimesAdapter,
     magnificPopupAdapter
   ];
@@ -2049,7 +2189,7 @@
         hideStatusIndicator();
         alert(
           'No supported open gallery detected. Open a supported lightbox first ' +
-          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, Fraser Gallery, Wix Pro Gallery, Booking.com, SuperYacht Times, or Magnific Popup).'
+          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, Fraser Gallery, Wix Pro Gallery, Booking.com, Boat International, SuperYacht Times, or Magnific Popup).'
         );
         return;
       }
