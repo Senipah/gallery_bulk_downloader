@@ -1152,6 +1152,151 @@
     return uniqueMediaItems(Array.from(byPhotoId.values()));
   }
 
+  function isSuperYachtTimesHost() {
+    const host = String(window.location.hostname || '').toLowerCase();
+    return host === 'superyachttimes.com' || host.endsWith('.superyachttimes.com');
+  }
+
+  let superYachtTimesCache = {
+    href: '',
+    nextData: null,
+    mediaItems: null
+  };
+
+  function ensureSuperYachtTimesCache() {
+    const href = window.location.href;
+    if (superYachtTimesCache.href !== href) {
+      superYachtTimesCache = {
+        href,
+        nextData: null,
+        mediaItems: null
+      };
+    }
+  }
+
+  function getSuperYachtTimesNextData() {
+    if (!isSuperYachtTimesHost()) return null;
+
+    ensureSuperYachtTimesCache();
+    if (superYachtTimesCache.nextData) return superYachtTimesCache.nextData;
+
+    const script = document.getElementById('__NEXT_DATA__');
+    if (!script) return null;
+
+    try {
+      const parsed = JSON.parse(script.textContent || '{}');
+      superYachtTimesCache.nextData = parsed;
+      return parsed;
+    } catch (error) {
+      console.warn('Could not parse __NEXT_DATA__ for SuperYacht Times gallery extraction.', error);
+      return null;
+    }
+  }
+
+  function normalizeSuperYachtTimesPhotoUrl(rawUrl, photoId = '') {
+    if (!rawUrl) return null;
+
+    const trimmed = String(rawUrl).trim();
+    if (!trimmed) return null;
+
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+
+    const cleaned = trimmed.replace(/^\/+/, '');
+    if (/^download\//i.test(cleaned)) {
+      return `https://photos.superyachtapi.com/${cleaned}`;
+    }
+
+    if (/^photo\//i.test(cleaned)) {
+      return `https://photos.superyachtapi.com/download/${cleaned}`;
+    }
+
+    if (/^(extra[-_]large|large|medium|small)$/i.test(cleaned) && photoId) {
+      const normalizedSize = cleaned.replace('_', '-').toLowerCase();
+      return `https://photos.superyachtapi.com/download/${photoId}/${normalizedSize}`;
+    }
+
+    return `https://photos.superyachtapi.com/download/${cleaned}`;
+  }
+
+  function getSuperYachtTimesPreferredPhotoPath(photo) {
+    if (!photo || typeof photo !== 'object') return null;
+
+    const versions = Array.isArray(photo.versions) ? photo.versions : [];
+    const preferredVersionOrder = ['extra_large', 'large', 'original', 'medium', 'small'];
+    for (const preferred of preferredVersionOrder) {
+      const version = versions.find((candidate) => {
+        if (!candidate || typeof candidate !== 'object') return false;
+        const versionName = String(candidate.name || '').toLowerCase().replace(/-/g, '_');
+        return versionName === preferred;
+      });
+      if (version && typeof version.id === 'string' && version.id.trim()) {
+        return version.id.trim();
+      }
+    }
+
+    const urls = photo.urls && typeof photo.urls === 'object' ? photo.urls : null;
+    if (!urls) return null;
+
+    const preferredUrlOrder = ['extraLarge', 'extra_large', 'large', 'medium', 'small'];
+    for (const key of preferredUrlOrder) {
+      const candidate = urls[key];
+      if (typeof candidate === 'string' && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+
+    return null;
+  }
+
+  function getSuperYachtTimesGalleryItems() {
+    if (!isSuperYachtTimesHost()) return [];
+
+    ensureSuperYachtTimesCache();
+    if (Array.isArray(superYachtTimesCache.mediaItems)) {
+      return superYachtTimesCache.mediaItems;
+    }
+
+    const nextData = getSuperYachtTimesNextData();
+    const pageProps = nextData && nextData.props ? nextData.props.pageProps : null;
+    const articleInfo = pageProps && pageProps.articleInfo ? pageProps.articleInfo : null;
+    const imagesById = articleInfo && typeof articleInfo.images === 'object'
+      ? articleInfo.images
+      : null;
+
+    if (!imagesById) {
+      superYachtTimesCache.mediaItems = [];
+      return superYachtTimesCache.mediaItems;
+    }
+
+    const explicitIds = Array.isArray(pageProps && pageProps.imageIds)
+      ? pageProps.imageIds.map((id) => String(id))
+      : [];
+    const imageIds = explicitIds.length ? explicitIds : Object.keys(imagesById);
+
+    const items = [];
+    for (const imageId of imageIds) {
+      const photo = imagesById[imageId];
+      if (!photo) continue;
+
+      const preferredPath = getSuperYachtTimesPreferredPhotoPath(photo);
+      const absoluteUrl = normalizeSuperYachtTimesPhotoUrl(preferredPath, imageId);
+      const item = createMediaItem(absoluteUrl, 'image');
+      if (item) items.push(item);
+    }
+
+    superYachtTimesCache.mediaItems = uniqueMediaItems(items);
+    return superYachtTimesCache.mediaItems;
+  }
+
+  function getSuperYachtTimesCurrentMediaElement() {
+    const candidates = Array.from(document.querySelectorAll('img[src*="photos.superyachtapi.com/download"]'));
+    for (const img of candidates) {
+      if (isElementVisible(img)) return img;
+    }
+
+    return candidates[0] || findFirstSupportedMedia(document.body);
+  }
+
   const lightGalleryAdapter = {
     name: 'LightGallery',
     isOpen() {
@@ -1638,6 +1783,43 @@
     }
   };
 
+  const superYachtTimesAdapter = {
+    name: 'SuperYacht Times Article Gallery',
+    isOpen() {
+      if (!isSuperYachtTimesHost()) return false;
+
+      const nextData = getSuperYachtTimesNextData();
+      const pageType = nextData && typeof nextData.page === 'string' ? nextData.page : '';
+      if (pageType !== '/yacht-news/[articleSlug]') return false;
+
+      return getSuperYachtTimesGalleryItems().length > 0;
+    },
+    getCurrentMediaEl() {
+      return getSuperYachtTimesCurrentMediaElement();
+    },
+    getCurrentUrl() {
+      return getMediaUrlFromElement(this.getCurrentMediaEl());
+    },
+    getNextButton() {
+      return null;
+    },
+    isNextDisabled(btn) {
+      return isNextButtonDisabled(btn);
+    },
+    async getAllUrls() {
+      const items = getSuperYachtTimesGalleryItems();
+      if (items.length) {
+        console.log('Resolved SuperYacht Times gallery media from __NEXT_DATA__.');
+        return uniqueMediaItems(items);
+      }
+
+      return null;
+    },
+    async waitForNext(previousUrl, timeoutMs = 10000) {
+      return waitForGalleryMediaChange(this, previousUrl, timeoutMs);
+    }
+  };
+
   const magnificPopupAdapter = {
     name: 'Magnific Popup',
     isOpen() {
@@ -1678,6 +1860,7 @@
     fraserGalleryAdapter,
     wixProGalleryAdapter,
     bookingGalleryAdapter,
+    superYachtTimesAdapter,
     magnificPopupAdapter
   ];
 
@@ -1856,7 +2039,7 @@
         hideStatusIndicator();
         alert(
           'No supported open gallery detected. Open a supported lightbox first ' +
-          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, Fraser Gallery, Wix Pro Gallery, Booking.com, or Magnific Popup).'
+          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, Fraser Gallery, Wix Pro Gallery, Booking.com, SuperYacht Times, or Magnific Popup).'
         );
         return;
       }
