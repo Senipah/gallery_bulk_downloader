@@ -902,6 +902,105 @@
     );
   }
 
+  function getElementorLightboxOpenRoot() {
+    const roots = Array.from(document.querySelectorAll('.dialog-widget.dialog-lightbox-widget.elementor-lightbox'));
+    return roots.find((root) => isElementVisible(root) && root.querySelector('.dialog-message.dialog-lightbox-message')) || null;
+  }
+
+  function decodeElementorActionHashUrl(actionHash) {
+    if (!actionHash) return null;
+
+    try {
+      const decoded = decodeURIComponent(String(actionHash).trim().replace(/^#/, ''));
+      const match = decoded.match(/(?:^|&)settings=([^&]+)/i);
+      if (!match || !match[1]) return null;
+
+      const encodedSettings = match[1].replace(/-/g, '+').replace(/_/g, '/');
+      const paddedSettings = encodedSettings.padEnd(Math.ceil(encodedSettings.length / 4) * 4, '=');
+      const settings = JSON.parse(window.atob(paddedSettings));
+      return settings && typeof settings.url === 'string' ? settings.url : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function getElementorLightboxSlideshowId(root) {
+    if (!root || !root.id) return '';
+    const match = String(root.id).match(/^elementor-lightbox-slideshow-(.+)$/);
+    return match ? match[1] : '';
+  }
+
+  function getElementorLightboxMediaUrl(el) {
+    if (!el) return null;
+
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag === 'img') {
+      return el.currentSrc || el.src || el.getAttribute('src') || el.getAttribute('data-src') || null;
+    }
+
+    return getMediaUrlFromElement(el);
+  }
+
+  function getElementorLightboxCurrentSlide(root) {
+    if (!root) return null;
+
+    return root.querySelector(
+      '.elementor-lightbox-item.swiper-slide-active, .elementor-lightbox-item.swiper-slide-duplicate-active'
+    );
+  }
+
+  function getElementorLightboxCounterInfo(root) {
+    const activeSlide = getElementorLightboxCurrentSlide(root);
+    if (!activeSlide) return null;
+    return parseCounterText(activeSlide.getAttribute('aria-label') || '');
+  }
+
+  function getElementorLightboxCurrentUrl(root) {
+    const activeSlide = getElementorLightboxCurrentSlide(root);
+    if (activeSlide) {
+      const fromActionHash = decodeElementorActionHashUrl(activeSlide.getAttribute('data-e-action-hash'));
+      if (fromActionHash) return fromActionHash;
+
+      const activeMedia = activeSlide.querySelector('.elementor-lightbox-image, video, source[src], img');
+      const fromActiveMedia = getElementorLightboxMediaUrl(activeMedia);
+      if (fromActiveMedia) return fromActiveMedia;
+    }
+
+    const rootMedia = root ? root.querySelector('.elementor-lightbox-image, video, source[src], img') : null;
+    return getElementorLightboxMediaUrl(rootMedia);
+  }
+
+  function getElementorLightboxItems(root) {
+    const items = [];
+
+    if (root) {
+      root.querySelectorAll('.elementor-lightbox-item').forEach((slide) => {
+        const fromActionHash = decodeElementorActionHashUrl(slide.getAttribute('data-e-action-hash'));
+        const fromHashItem = createMediaItem(fromActionHash, getHintedMediaTypeFromElement(slide));
+        if (fromHashItem) items.push(fromHashItem);
+
+        slide.querySelectorAll('.elementor-lightbox-image, video, source[src], img').forEach((el) => {
+          const item = createMediaItem(getElementorLightboxMediaUrl(el), getHintedMediaTypeFromElement(el));
+          if (item) items.push(item);
+        });
+      });
+    }
+
+    const slideshowId = getElementorLightboxSlideshowId(root);
+    if (slideshowId) {
+      document.querySelectorAll('[data-elementor-open-lightbox="yes"][data-elementor-lightbox-slideshow]').forEach((trigger) => {
+        if (trigger.getAttribute('data-elementor-lightbox-slideshow') !== slideshowId) return;
+
+        const fromActionHash = decodeElementorActionHashUrl(trigger.getAttribute('data-e-action-hash'));
+        const url = fromActionHash || getAnchorLikeUrl(trigger);
+        const item = createMediaItem(url, getHintedMediaTypeFromElement(trigger));
+        if (item) items.push(item);
+      });
+    }
+
+    return uniqueMediaItems(items);
+  }
+
   function getLightbox2CounterInfo() {
     const numberEl = document.querySelector('#lightbox .lb-number');
     return numberEl ? parseCounterText(numberEl.textContent || '') : null;
@@ -1678,6 +1777,55 @@
     }
   };
 
+  const elementorLightboxAdapter = {
+    name: 'Elementor Lightbox',
+    isOpen() {
+      return !!getElementorLightboxOpenRoot();
+    },
+    getCurrentMediaEl() {
+      const root = getElementorLightboxOpenRoot();
+      if (!root) return null;
+
+      const activeSlide = getElementorLightboxCurrentSlide(root);
+      if (activeSlide) {
+        const direct = activeSlide.querySelector('.elementor-lightbox-image, video, source[src], img');
+        if (direct) return direct;
+      }
+
+      return findFirstSupportedMedia(root);
+    },
+    getCurrentUrl() {
+      const root = getElementorLightboxOpenRoot();
+      return root ? getElementorLightboxCurrentUrl(root) : null;
+    },
+    getNextButton() {
+      const root = getElementorLightboxOpenRoot();
+      return root ? root.querySelector('.elementor-swiper-button-next') : null;
+    },
+    isNextDisabled(btn) {
+      if (isNextButtonDisabled(btn)) return true;
+
+      const root = getElementorLightboxOpenRoot();
+      const info = getElementorLightboxCounterInfo(root);
+      if (!info) return false;
+
+      return info.index >= info.total - 1;
+    },
+    async getAllUrls() {
+      const root = getElementorLightboxOpenRoot();
+      const items = getElementorLightboxItems(root);
+      if (items.length) {
+        console.log('Resolved Elementor Lightbox media from open modal and slideshow triggers.');
+        return items;
+      }
+
+      return null;
+    },
+    async waitForNext(previousUrl, timeoutMs = 10000) {
+      return waitForGalleryMediaChange(this, previousUrl, timeoutMs);
+    }
+  };
+
   const lightbox2Adapter = {
     name: 'Lightbox2',
     isOpen() {
@@ -2005,6 +2153,7 @@
     photoSwipeAdapter,
     fsLightboxAdapter,
     glightboxAdapter,
+    elementorLightboxAdapter,
     lightbox2Adapter,
     fraserGalleryAdapter,
     wixProGalleryAdapter,
@@ -2189,7 +2338,7 @@
         hideStatusIndicator();
         alert(
           'No supported open gallery detected. Open a supported lightbox first ' +
-          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Lightbox2, Fraser Gallery, Wix Pro Gallery, Booking.com, Boat International, SuperYacht Times, or Magnific Popup).'
+          '(LightGallery, Webflow, Parvus, Fancybox, PhotoSwipe, FS Lightbox, GLightbox, Elementor Lightbox, Lightbox2, Fraser Gallery, Wix Pro Gallery, Booking.com, Boat International, SuperYacht Times, or Magnific Popup).'
         );
         return;
       }
